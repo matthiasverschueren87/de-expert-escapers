@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+# Indexering wordt geweigerd via de robots-metatag op de pagina.
