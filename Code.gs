@@ -36,7 +36,7 @@ function enablePaymentReminders(){
  if(!props_().getProperty('OWNER_EMAIL'))fail_('Beheerder ontbreekt.');
  const existing=ScriptApp.getProjectTriggers().filter(t=>t.getHandlerFunction()==='sendPaymentReminders');
  if(!existing.length)ScriptApp.newTrigger('sendPaymentReminders').timeBased().atHour(9).everyDays(1).inTimezone('Europe/Brussels').create();
- props_().setProperty('REMINDERS_ENABLED','true');console.log('Betaalherinneringen actief: 2 dagen vooraf, dagelijks rond 09:00 Belgische tijd.');
+ props_().setProperty('REMINDERS_ENABLED','true');console.log('Speel- en betaalherinneringen actief: 2 dagen vooraf, dagelijks rond 09:00 Belgische tijd.');
 }
 function authenticate_(x){
  if(typeof x.token!=='string'||x.token.length<40||x.token.length>200)fail_('Log eerst in.','AUTH_REQUIRED');
@@ -75,7 +75,7 @@ function version_(v){return Utilities.base64EncodeWebSafe(Utilities.computeDiges
 function room_(id){const r=legacyRooms_().find(r=>r.id===id),meta=get_('RoomMeta',id);if(!r||meta&&meta.archived)fail_('Deze kamer is niet beschikbaar.');return {...r,meta:meta||{},version:version_({...r,meta:meta||{}})}}
 function loadData_(m){
  const metas=records_('RoomMeta'),rooms=legacyRooms_().filter(r=>!metas.some(t=>t.id===r.id&&t.archived)).map(r=>{const meta=metas.find(t=>t.id===r.id)||{};return {...r,meta,version:version_({...r,meta})}});
- return {me:{...cleanMember_(m),email:m.email,role:m.role,notifications:m.notifications!==false},members:records_('Members').filter(a=>a.verifiedAt&&!a.disabled).map(cleanMember_),rooms,opinions:records_('Opinions'),comments:records_('Comments').filter(c=>!c.deleted),plans:records_('Plans'),remindersEnabled:props_().getProperty('REMINDERS_ENABLED')==='true',invite:admin_(m)?props_().getProperty('TEAM_INVITE'):null};
+ return {me:{...cleanMember_(m),email:m.email,role:m.role,notifications:m.notifications!==false,gameNotifications:m.gameNotifications!==false},members:records_('Members').filter(a=>a.verifiedAt&&!a.disabled).map(cleanMember_),rooms,opinions:records_('Opinions'),comments:records_('Comments').filter(c=>!c.deleted),plans:records_('Plans'),remindersEnabled:props_().getProperty('REMINDERS_ENABLED')==='true',invite:admin_(m)?props_().getProperty('TEAM_INVITE'):null};
 }
 function cleanRoom_(v){const r={};for(const k of ['name','provider','location','website','players','theme','date','notes'])r[k]=str_(v[k]||'',k==='notes'?3000:k==='website'?800:180);if(!r.name)fail_('Een kamer heeft een naam nodig.');if(r.website&&!/^https?:\/\//i.test(r.website))fail_('Gebruik een geldige website.');if(!['wishlist','booked','played'].includes(v.bucketId))fail_('Ongeldige status.');r.bucketId=v.bucketId;for(const k of ['price','duration']){r[k]=v[k]===''||v[k]==null?'':Number(v[k]);if(r[k]!==''&&(!Number.isFinite(r[k])||r[k]<0||r[k]>100000))fail_('Ongeldig bedrag of aantal.')}if(r.date&&!validDate_(r.date))fail_('Ongeldige datum.');return r}
 function saveRoom_(x,m){
@@ -119,15 +119,33 @@ function html_(v){return String(v||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'
 function eur_(v){return '€ '+(v/100).toFixed(2).replace('.',',')}
 function mailFrame_(title,body){return '<!doctype html><html lang="nl"><head><meta charset="utf-8"></head><body style="margin:0;padding:24px 12px;background:#002b44;font-family:Arial,sans-serif;color:#f4eddc"><table role="presentation" style="max-width:580px;width:100%;margin:auto;background:#004369;border:1px solid #326981;border-radius:12px"><tr><td style="padding:32px"><p style="font-size:12px;letter-spacing:3px;color:#68c9c4">DE EXPERT ESCAPERS ↗</p><h1 style="font-size:30px;line-height:1.2;color:#f4eddc">'+html_(title)+'</h1><div style="font-size:16px;line-height:1.7;color:#d4e4e9">'+body+'</div><p style="padding-top:25px;border-top:1px solid #326981;font-size:12px;color:#b0cad6">Verzamel avonturen. Samen achter de volgende deur.</p></td></tr></table></body></html>'}
 function sendMail_(to,subject,html,plain){MailApp.sendEmail({to,subject,name:'De Expert Escapers',replyTo:props_().getProperty('OWNER_EMAIL'),body:plain,htmlBody:html})}
+function gameReminderNeeded_(p,today){return p.status==='active'&&daysAway_(p.date,today)>=0&&daysAway_(p.date,today)<=2}
+function planReminderMail_(p,a,u,room,members,includeGame,includePayment,today){
+ const date=p.date.split('-').reverse().join('/'),time=p.time||'Nog af te spreken',place=[room.provider,room.location].filter(Boolean).join(' · ')||'Bekijk de tool voor de locatie.',names=p.participants.map(a=>{const m=members.find(m=>m.id===a.userId);return m?m.name:'Teamlid'}).join(', '),payer=members.find(m=>m.id===p.paidBy),days=daysAway_(p.date,today),when=days===2?'Over 2 dagen':days===1?'Morgen':'Vandaag';
+ let body='<p>Hallo '+html_(u.name)+',</p>',plain='Hallo '+u.name+',\n\n';
+ if(includeGame){body+='<p><strong>'+when+'</strong> spelen we <strong>'+html_(room.name)+'</strong>. Klaar voor ons volgende avontuur?</p><table role="presentation" style="width:100%;border-collapse:collapse;background:#00334f;border-radius:8px"><tr><td style="padding:18px"><strong>Datum</strong><br>'+date+'<br><strong>Starttijd</strong><br>'+html_(time)+'<br><strong>Locatie</strong><br>'+html_(place)+'<br><strong>Deelnemers</strong><br>'+html_(names)+'</td></tr></table>';
+ plain+=when+' spelen we '+room.name+'.\nDatum: '+date+'\nStarttijd: '+time+'\nLocatie: '+place+'\nDeelnemers: '+names+'\n';
+ if(p.notes){body+='<p><strong>Onze afspraken</strong><br>'+html_(p.notes).replace(/\n/g,'<br>')+'</p>';plain+='Afspraken: '+p.notes+'\n'}
+ if(a.status==='paid'&&a.amountCents>0){body+='<p style="color:#68c9c4">Je bijdrage is al betaald. Helemaal klaar voor het avontuur.</p>';plain+='Je bijdrage is al betaald.\n'}
+ else if(a.status==='reported'){body+='<p>Je hebt je betaling gemeld. De organisator kan die nog bevestigen.</p>';plain+='Je hebt je betaling gemeld; de organisator kan die nog bevestigen.\n'}
+ }else{body+='<p>Ons avontuur <strong>'+html_(room.name)+'</strong> staat gepland op <strong>'+date+'</strong>.</p>';plain+='Ons avontuur '+room.name+' staat gepland op '+date+'.\n'}
+ if(includePayment){body+='<p>Jouw openstaande bijdrage:</p><p style="font-size:34px;color:#f4eddc;font-weight:bold">'+eur_(a.amountCents)+'</p><p>'+html_(payer?payer.name:'De organisator')+' heeft voorgeschoten. Heb je al betaald? Meld dat in de tool; de organisator kan je betaling bevestigen.</p>';plain+='Je openstaande bijdrage: '+eur_(a.amountCents)+'. Voorschieter: '+(payer?payer.name:'de organisator')+'. Heb je al betaald? Meld dat in de tool.\n'}
+ const url=EE_URL+'?room='+encodeURIComponent(p.roomId);body+='<p><a href="'+url+'" style="display:inline-block;padding:14px 22px;background:#db1f48;color:#ffffff;text-decoration:none;border-radius:6px;font-weight:bold">'+(includeGame?'Bekijk ons avontuur':'Bekijk mijn betaling')+' ↗</a></p>';plain+='\nBekijk ons avontuur: '+url;
+ return {subject:(includeGame?when+' spelen we '+room.name:'Je bijdrage voor '+room.name)+' · De Expert Escapers',html:mailFrame_('Bijna tijd voor avontuur.',body),plain};
+}
+// Bestaande dagelijkse trigger blijft dezelfde functie gebruiken; geen tweede trigger nodig.
 function sendPaymentReminders(){
- const lock=LockService.getScriptLock();if(!lock.tryLock(15000))return;
+ EE_DB_CACHE=null;EE_RECORD_CACHE={};const lock=LockService.getScriptLock();if(!lock.tryLock(15000))return;
  try{if(props_().getProperty('REMINDERS_ENABLED')!=='true')return;const today=today_(),plans=records_('Plans'),members=records_('Members'),log=records_('MailLog'),rooms=legacyRooms_();
- for(const p of plans)for(const a of p.participants){if(!reminderNeeded_(p,a,today))continue;const u=members.find(m=>m.id===a.userId),payer=members.find(m=>m.id===p.paidBy),room=rooms.find(r=>r.id===p.roomId);if(!u||!u.verifiedAt||u.disabled||u.notifications===false||!room)continue;
- const id=version_([p.id,a.userId,p.date,a.amountCents]);if(log.some(l=>l.id===id))continue;if(MailApp.getRemainingDailyQuota()<1)return;
- // Een vooraf geregistreerde poging voorkomt een dubbele mail na een onzekere providerrespons.
- put_('MailLog',id,{planId:p.id,userId:u.id,status:'attempted',at:now_()});
- const date=p.date.split('-').reverse().join('/'),body='<p>Hallo '+html_(u.name)+',</p><p>Ons avontuur <strong>'+html_(room.name)+'</strong> staat gepland op <strong>'+date+'</strong>.</p><p>Jouw openstaande bijdrage:</p><p style="font-size:34px;color:#f4eddc;font-weight:bold">'+eur_(a.amountCents)+'</p><p>'+html_(payer?payer.name:'De organisator')+' heeft voorgeschoten. Heb je al betaald? Meld dat in de tool; de organisator kan je betaling bevestigen.</p><p><a href="'+EE_URL+'?room='+encodeURIComponent(p.roomId)+'" style="display:inline-block;padding:14px 22px;background:#db1f48;color:#ffffff;text-decoration:none;border-radius:6px;font-weight:bold">Bekijk mijn betaling ↗</a></p>';
- try{sendMail_(u.email,'Je bijdrage voor '+room.name+' · De Expert Escapers',mailFrame_('Bijna tijd voor avontuur.',body),'Hallo '+u.name+', je openstaande bijdrage voor '+room.name+' op '+date+' is '+eur_(a.amountCents)+'. Voorschieter: '+(payer?payer.name:'organisator')+'. Bekijk je betaling: '+EE_URL);put_('MailLog',id,{planId:p.id,userId:u.id,status:'sent',at:now_()})}catch(err){put_('MailLog',id,{planId:p.id,userId:u.id,status:'needs_review',at:now_(),error:String(err.message).slice(0,300)})}
+ for(const p of plans)for(const a of p.participants){const u=members.find(m=>m.id===a.userId),room=rooms.find(r=>r.id===p.roomId);if(!u||!u.verifiedAt||u.disabled||!room)continue;
+ const gameId=version_(['game',p.id,a.userId,p.date]),paymentId=version_([p.id,a.userId,p.date,a.amountCents]);
+ const includeGame=u.gameNotifications!==false&&gameReminderNeeded_(p,today)&&!log.some(l=>l.id===gameId),includePayment=u.notifications!==false&&reminderNeeded_(p,a,today)&&!log.some(l=>l.id===paymentId);
+ if(!includeGame&&!includePayment)continue;if(MailApp.getRemainingDailyQuota()<1)return;
+ const ids=[];if(includeGame)ids.push({id:gameId,kind:'game'});if(includePayment)ids.push({id:paymentId,kind:'payment'});
+ const record=(status,error)=>ids.forEach(item=>put_('MailLog',item.id,{planId:p.id,userId:u.id,kind:item.kind,status,at:now_(),...(error?{error:String(error).slice(0,300)}:{})}));
+ // Eerst registreren voorkomt dubbele mails bij een onzekere providerrespons.
+ record('attempted');const mail=planReminderMail_(p,a,u,room,members,includeGame,includePayment,today);
+ try{sendMail_(u.email,mail.subject,mail.html,mail.plain);record('sent')}catch(err){record('needs_review',err.message)}
  }}finally{lock.releaseLock()}
 }
 function doPost(e){EE_DB_CACHE=null;EE_RECORD_CACHE={};let lock;try{
@@ -139,7 +157,7 @@ function doPost(e){EE_DB_CACHE=null;EE_RECORD_CACHE={};let lock;try{
  if(x.action==='logout'){const t=get_('Sessions',digest_(x.token));t.revoked=true;put_('Sessions',digest_(x.token),t);return json_3_({ok:true})}
  if(!/^[a-zA-Z0-9-]{16,100}$/.test(x.requestId||''))fail_('Ontbrekende aanvraagcode.');
  const receiptId=m.id+':'+x.requestId,receipt=get_('Receipts',receiptId);if(receipt)return json_3_({ok:true,data:loadData_(m)});
- switch(x.action){case 'saveRoom':saveRoom_(x,m);break;case 'refreshRoomImage':refreshRoomImage_(x,m);break;case 'archiveRoom':archiveRoom_(x,m);break;case 'saveOpinion':saveOpinion_(x,m);break;case 'addComment':addComment_(x,m);break;case 'deleteComment':deleteComment_(x,m);break;case 'savePlan':savePlan_(x,m);break;case 'payment':payment_(x,m);break;case 'cancelPlan':cancelPlan_(x,m);break;case 'profile':m.name=str_(x.name,80);if(m.name.length<2)fail_('Vul je naam in.');m.notifications=x.notifications!==false;put_('Members',m.id,m);break;default:fail_('Onbekende actie.');}
+ switch(x.action){case 'saveRoom':saveRoom_(x,m);break;case 'refreshRoomImage':refreshRoomImage_(x,m);break;case 'archiveRoom':archiveRoom_(x,m);break;case 'saveOpinion':saveOpinion_(x,m);break;case 'addComment':addComment_(x,m);break;case 'deleteComment':deleteComment_(x,m);break;case 'savePlan':savePlan_(x,m);break;case 'payment':payment_(x,m);break;case 'cancelPlan':cancelPlan_(x,m);break;case 'profile':m.name=str_(x.name,80);if(m.name.length<2)fail_('Vul je naam in.');m.notifications=x.notifications!==false;if(x.gameNotifications!==undefined)m.gameNotifications=x.gameNotifications!==false;put_('Members',m.id,m);break;default:fail_('Onbekende actie.');}
  put_('Receipts',receiptId,{userId:m.id,action:x.action,at:now_()});return json_3_({ok:true,data:loadData_(m)});
  }catch(err){return json_3_({ok:false,error:String(err.message||err),code:err.code||'ERROR'})}finally{if(lock)lock.releaseLock()}}
 function doGet(){return json_3_({ok:true,version:3,message:'De Expert Escapers · accounts vereist'})}
