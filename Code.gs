@@ -84,7 +84,9 @@ function saveRoom_(x,m){
  else if(all.length>=1000)fail_('De lijst is vol.');
  if(row>s.getMaxRows())s.insertRowsAfter(s.getMaxRows(),100);
  const r={id,...value};s.getRange(row,11).setNumberFormat('@');s.getRange(row,1,1,14).setValues([[id,r.name,r.provider,r.location,r.website,r.bucketId,r.players,r.price,r.duration,r.theme,r.date,r.notes,old?old.favorite:false,old?old.order:all.length]]);
- const meta=get_('RoomMeta',id)||{createdBy:old?null:m.id,createdAt:old?'':now_()};put_('RoomMeta',id,{...meta,updatedBy:m.id,updatedAt:now_()});
+ const meta=get_('RoomMeta',id)||{createdBy:old?null:m.id,createdAt:old?'':now_()};
+ const image=(!old||old.website!==r.website||!meta.imageCheckedAt)?findRoomImage_(r.website):{imageUrl:meta.imageUrl||'',imageSource:meta.imageSource||'',imageCheckedAt:meta.imageCheckedAt};
+ put_('RoomMeta',id,{...meta,...image,updatedBy:m.id,updatedAt:now_()});
 }
 function archiveRoom_(x,m){const r=room_(str_(x.roomId,250));if(!admin_(m)&&r.meta.createdBy!==m.id)fail_('Alleen de toevoeger of beheerder kan deze kamer archiveren.','FORBIDDEN');if(records_('Plans').some(p=>p.roomId===r.id&&p.status!=='cancelled'&&p.date>=today_()))fail_('Annuleer eerst de geplande sessie.');put_('RoomMeta',r.id,{...r.meta,archived:true,updatedBy:m.id,updatedAt:now_()})}
 function stars_(v){v=Number(v||0);if(!Number.isInteger(v)||v<0||v>5)fail_('Kies 0 tot 5 sterren.');return v}
@@ -137,8 +139,52 @@ function doPost(e){EE_DB_CACHE=null;EE_RECORD_CACHE={};let lock;try{
  if(x.action==='logout'){const t=get_('Sessions',digest_(x.token));t.revoked=true;put_('Sessions',digest_(x.token),t);return json_3_({ok:true})}
  if(!/^[a-zA-Z0-9-]{16,100}$/.test(x.requestId||''))fail_('Ontbrekende aanvraagcode.');
  const receiptId=m.id+':'+x.requestId,receipt=get_('Receipts',receiptId);if(receipt)return json_3_({ok:true,data:loadData_(m)});
- switch(x.action){case 'saveRoom':saveRoom_(x,m);break;case 'archiveRoom':archiveRoom_(x,m);break;case 'saveOpinion':saveOpinion_(x,m);break;case 'addComment':addComment_(x,m);break;case 'deleteComment':deleteComment_(x,m);break;case 'savePlan':savePlan_(x,m);break;case 'payment':payment_(x,m);break;case 'cancelPlan':cancelPlan_(x,m);break;case 'profile':m.name=str_(x.name,80);if(m.name.length<2)fail_('Vul je naam in.');m.notifications=x.notifications!==false;put_('Members',m.id,m);break;default:fail_('Onbekende actie.');}
+ switch(x.action){case 'saveRoom':saveRoom_(x,m);break;case 'refreshRoomImage':refreshRoomImage_(x,m);break;case 'archiveRoom':archiveRoom_(x,m);break;case 'saveOpinion':saveOpinion_(x,m);break;case 'addComment':addComment_(x,m);break;case 'deleteComment':deleteComment_(x,m);break;case 'savePlan':savePlan_(x,m);break;case 'payment':payment_(x,m);break;case 'cancelPlan':cancelPlan_(x,m);break;case 'profile':m.name=str_(x.name,80);if(m.name.length<2)fail_('Vul je naam in.');m.notifications=x.notifications!==false;put_('Members',m.id,m);break;default:fail_('Onbekende actie.');}
  put_('Receipts',receiptId,{userId:m.id,action:x.action,at:now_()});return json_3_({ok:true,data:loadData_(m)});
  }catch(err){return json_3_({ok:false,error:String(err.message||err),code:err.code||'ERROR'})}finally{if(lock)lock.releaseLock()}}
 function doGet(){return json_3_({ok:true,version:3,message:'De Expert Escapers · accounts vereist'})}
 function json_3_(v){return ContentService.createTextOutput(JSON.stringify(v)).setMimeType(ContentService.MimeType.JSON)}
+
+// Alleen publieke HTTP(S)-websites; maximaal drie gecontroleerde redirects.
+function publicImageUrl_(raw,base){
+ raw=String(raw||'').trim().replace(/&amp;/gi,'&').replace(/&#(\d+);/g,(_,n)=>String.fromCharCode(Number(n))).replace(/&quot;/gi,'"');
+ if(!raw||raw.length>2000||/[\s\\<>"'\x00-\x1f]/.test(raw))return '';
+ if(/^[a-z][a-z0-9+.-]*:/i.test(raw)&&!/^https?:\/\//i.test(raw))return '';
+ if(raw.indexOf('//')===0)raw='https:'+raw;
+ if(!/^https?:\/\//i.test(raw)){
+  const b=/^(https?:\/\/[^/]+)(\/[^?#]*)?/i.exec(base||'');if(!b)return '';
+  raw=raw[0]==='/'?b[1]+raw:b[1]+(b[2]||'/').replace(/[^/]*$/,'')+raw;
+ }
+ const m=/^(https?):\/\/([^/?#]+)([^#]*)/i.exec(raw);if(!m)return '';
+ const host=m[2].toLowerCase();if(host.includes('@')||host.includes(':')||!host.includes('.')||/^[\d.]+$/.test(host)||!/^([a-z0-9-]+\.)+[a-z]{2,63}$/.test(host)||/(^|\.)(localhost|local|internal|test|invalid|example)$/.test(host)||host.endsWith('.google.internal'))return '';
+ return m[1].toLowerCase()+'://'+host+(m[3]||'/');
+}
+function imageFetch_(url){
+ for(let n=0;n<4;n++){
+  url=publicImageUrl_(url);if(!url)throw Error('Geen publieke URL.');
+  const r=UrlFetchApp.fetch(url,{muteHttpExceptions:true,followRedirects:false,validateHttpsCertificates:true,headers:{'User-Agent':'DeExpertEscapers/1.0 (room preview)'}}),code=r.getResponseCode();
+  if([301,302,303,307,308].includes(code)){const h=r.getAllHeaders();url=publicImageUrl_(h.Location||h.location,url);continue}
+  if(code<200||code>=300)throw Error('Website niet beschikbaar.');return {response:r,url};
+ }
+ throw Error('Te veel omleidingen.');
+}
+function imageFromHtml_(html,base){
+ const metas=String(html).slice(0,500000).match(/<meta\b[^>]*>/gi)||[],found={};
+ for(const tag of metas){const attrs={};tag.replace(/([\w:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g,(_,k,a,b,c)=>{attrs[k.toLowerCase()]=a??b??c;return ''});const key=(attrs.property||attrs.name||'').toLowerCase();if(attrs.content&&!found[key])found[key]=attrs.content}
+ for(const key of ['og:image:secure_url','og:image','twitter:image','twitter:image:src']){const u=publicImageUrl_(found[key],base);if(u)return u}
+ // Veel kleine websites hebben geen deelmetadata, maar wel een herkenbaar bedrijfslogo.
+ for(const tag of (String(html).slice(0,500000).match(/<img\b[^>]*>/gi)||[])){if(!/logo/i.test(tag))continue;const attrs={};tag.replace(/([\w:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g,(_,k,a,b,c)=>{attrs[k.toLowerCase()]=a??b??c;return ''});const u=publicImageUrl_(attrs['data-src']||attrs.src,base);if(u)return u}return '';
+}
+function findRoomImage_(website){
+ const result={imageUrl:'',imageSource:'',imageCheckedAt:now_()},url=publicImageUrl_(website);if(!url)return result;
+ try{const page=imageFetch_(url),r=page.response,h=r.getAllHeaders(),type=String(h['Content-Type']||h['content-type']||'');if(type&&!/text\/html|application\/xhtml/i.test(type))return result;
+ const image=imageFromHtml_(r.getContentText(),page.url);if(image){result.imageUrl=image;result.imageSource=page.url}
+ }catch(e){/* Een geblokkeerde website mag het opslaan van een kamer niet verhinderen. */}return result;
+}
+function refreshRoomImage_(x,m){const r=room_(str_(x.roomId,250));put_('RoomMeta',r.id,{...r.meta,...findRoomImage_(r.website)})}
+function backfillRoomImages(){
+ // Handmatig door de eigenaar; kleine batches houden de uitvoering begrensd.
+ EE_DB_CACHE=null;EE_RECORD_CACHE={};let count=0;
+ for(const r of legacyRooms_()){const meta=get_('RoomMeta',r.id)||{};if(!meta.archived&&r.website&&!meta.imageCheckedAt){put_('RoomMeta',r.id,{...meta,...findRoomImage_(r.website)});count++;if(count>=10)break}}
+ console.log('Afbeeldingen gecontroleerd voor '+count+' kamers.');
+}
